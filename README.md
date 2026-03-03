@@ -1,220 +1,291 @@
-## Overview
-
-Build a production-ready data ingestion system that extracts event data from the DataSync Analytics API and stores it in a PostgreSQL database.
-
-## Requirements
-
-Your solution must:
-
-1. Run entirely in Docker using the provided `docker-compose.yml`
-2. Work with the command: `sh run-ingestion.sh`
-**Tools Policy:**
-- **Allowed:** Any AI coding tools or development tools during development
-- **Solution constraint:** Your final solution must run entirely in Docker without requiring external API keys or 3rd party services
+# DataSync Ingestion Solution
 
 
-If you use AI tools, please document which ones and how they helped in your solution's README.
+### My README
+---
+Although I ran out of time, I was able to figure out the streaming endpoint would have been substantially faster than Claude's solution. It was a mistake to leave the initial API discovery to Claude, and investigate myself after Claude had started building a solution. Claude, having restrictions on unpublished/undocumented API's, would not use the /events/d4ta/x7k9/feed endpoint, and to write a solution from scratch would be tight, given I am editing this README about 16 minutes from the 3hr key expiration. Time permitting, I would get the stream-access token on any failed request, fetch events(feed) in batches of 5000 (discovered limit), and remove the logic for cooldown. I did NOT see a cooldown associated with the stream/feed API. Each batch of 5000 took approximately 4.09s, which in series would execute under ideal circumstances in 2454s/41m. (3000000/5000*4.09)
 
-## The Challenge
+Given the instructions said under 30m was possible, I assume we can use concurrency - perhaps even with separate tokens?
+My submission only has 5000 ids purely to show the endpoint was reached manually.
+Claude's solution should work as expected, albeit slowly, via the regular events API, taking ~3 hours to execute.
 
-DataSync Analytics is a live application with:
-- **Dashboard:** http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com (explore the UI!)
-- **API:** http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1
 
-Your task is to:
 
-1. **Connect** to the DataSync API
-2. **Extract** ALL events from the system (3,000,000)
-3. **Handle** the API's pagination correctly
-4. **Respect** rate limits
-5. **Store** data in PostgreSQL
-7. **Make it resumable** (save progress, resume after failure)
+### Claude's README 
+--- 
 
-### Important Notes
 
-- The API documentation is minimal by design
-- Part of this challenge is **discovering** how the API works
-- Pay attention to response headers and data formats
-- The API has behaviors that aren't documented
-- Timestamp formats may vary across responses - normalize carefully
-
-## Getting Started
-
-### Prerequisites
-
-- Docker and Docker Compose
-- Node.js 20+
-- npm or yarn
-
-### Your Workspace
-
-Use this directory as your workspace. A `docker-compose.yml` is provided with PostgreSQL for your solution.
+## How to Run
 
 ```bash
-docker compose up -d
+sh run-ingestion.sh
 ```
 
-This gives you:
-- PostgreSQL at `localhost:5434`
+This starts PostgreSQL and the ingestion worker via Docker Compose. The script monitors progress and exits when all 3,000,000 events are ingested.
 
-### Exploring the Application
+## Architecture Overview
 
-**Dashboard:** http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com
-- Browse the dashboard to understand the data model
-- Curious developers explore everything...
-
-**API Base URL:** `http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1`
-
-**API Key:** You should have received a unique API key from your interviewer.
-
-> **Important:** Your API key is valid for **3 hours from first use**. The timer starts when you make your first API call. Plan your work accordingly.
-
-**API Documentation:** http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/docs/api.md
-
-## Requirements
-
-### Must Have
-
-1. **TypeScript** codebase
-2. **PostgreSQL** for data storage
-3. **Docker Compose** for running your solution
-4. **Proper error handling** and logging
-5. **Rate limit handling** - respect the API limits
-6. **Resumable ingestion** - if the process crashes, it should resume from where it left off
-
-### Should Have
-
-1. **Throughput optimization** - maximize events per second
-2. **Progress tracking** - show ingestion progress
-3. **Health checks** - monitor worker health
-
-### Nice to Have
-
-1. **Unit tests**
-2. **Integration tests**
-3. **Metrics/monitoring**
-4. **Architecture documentation**
-
-## Submitting Your Results
-
-Once you've ingested all events, submit your results to verify completion.
-
-### Step 1: Push Your Solution to GitHub
-
-Before submitting, push your solution to a GitHub repository. This allows us to review your code and see your commit history/progress.
-
-### Step 2: Submit via API
-
-**POST** `http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1/submissions`
-
-Submit a file containing all event IDs (one per line) along with your GitHub repo URL.
-
-**Headers:**
-- `X-API-Key`: Your API key
-- `Content-Type`: `text/plain` or `application/json`
-
-**Option 1: Plain text with query param (recommended)**
-```bash
-curl -X POST \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -H "Content-Type: text/plain" \
-  --data-binary @event_ids.txt \
-  "http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1/submissions?github_repo=https://github.com/yourusername/your-repo"
+```
+┌──────────────────────────────────────────────────────┐
+│                  Ingestion Worker                     │
+│                                                      │
+│  ┌─────────────┐   ┌──────────────┐   ┌──────────┐  │
+│  │  Segment 0  │   │  Segment 1   │   │ Seg 2-9  │  │
+│  │ ts: newest  │   │ ts: mid-high │   │   ...    │  │
+│  │  cursor ──► │   │  cursor ──►  │   │  ──►     │  │
+│  └──────┬──────┘   └──────┬───────┘   └────┬─────┘  │
+│         │                 │                │         │
+│         └────────┬────────┴────────────────┘         │
+│                  ▼                                    │
+│         ┌────────────────┐                           │
+│         │  Rate Limiter  │  10 req/min window        │
+│         │  (10 parallel) │  fire all, wait, repeat   │
+│         └───────┬────────┘                           │
+│                 ▼                                    │
+│         ┌────────────────┐                           │
+│         │  Batch Insert  │  500-row chunks           │
+│         │  ON CONFLICT   │  dedup at boundary        │
+│         └───────┬────────┘                           │
+│                 ▼                                    │
+│         ┌────────────────┐                           │
+│         │   Progress DB  │  cursor per segment       │
+│         └────────────────┘                           │
+└──────────────────────┬───────────────────────────────┘
+                       ▼
+              ┌────────────────┐
+              │   PostgreSQL   │
+              │ ingested_events│
+              │  (3,000,000)   │
+              └────────────────┘
 ```
 
-**Option 2: JSON**
-```bash
-curl -X POST \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ids": "id1\nid2\nid3",
-    "githubRepoUrl": "https://github.com/yourusername/your-repo"
-  }' \
-  http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1/submissions
+**Core idea**: Split the event timeline into 10 segments with **synthetic cursors**, then fire 10 parallel API requests per rate-limit window (one per segment), achieving the maximum possible throughput of ~50,000 events/minute.
+
+### Key Components
+
+| File | Purpose |
+|------|---------|
+| `packages/ingestion/src/index.ts` | Main orchestrator — segments, rate-limit windows, progress loop |
+| `packages/ingestion/src/api.ts` | HTTP client, synthetic cursor creation, error types |
+| `packages/ingestion/src/db.ts` | PostgreSQL schema, batch inserts, progress tracking |
+| `packages/ingestion/Dockerfile` | Multi-stage build (compile TS → slim runtime image) |
+| `docker-compose.yml` | PostgreSQL + ingestion service |
+
+### Resumability
+
+- Each segment's cursor position is persisted to an `ingestion_progress` table after every page
+- On restart, completed segments are skipped and in-progress segments resume from their last cursor
+- `ON CONFLICT (id) DO NOTHING` handles deduplication at segment boundaries
+- Docker `restart: on-failure` auto-restarts the worker after transient failures
+
+---
+
+## API Discovery & Triage
+
+Below is a chronological log of every discovery made while exploring the API.
+
+### Step 1 — Root endpoint
+
+```
+GET /api/v1
+→ 200: { endpoints: { events, sessions, metrics }, auth: { header: "X-API-Key" } }
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "submissionId": "uuid",
-    "eventCount": 3000000,
-    "githubRepoUrl": "https://github.com/yourusername/your-repo",
-    "submittedAt": "2024-01-15T10:30:00.000Z",
-    "timeToSubmit": {
-      "ms": 1234567,
-      "seconds": 1235,
-      "minutes": 20.6,
-      "formatted": "20m 35s"
-    },
-    "submissionNumber": 1,
-    "remainingSubmissions": 4
-  },
-  "message": "Submission #1 received with 3,000,000 event IDs. 4 submissions remaining."
-}
+Three endpoints confirmed: `/events`, `/sessions`, `/metrics`.
+
+### Step 2 — Events endpoint (default)
+
+```
+GET /api/v1/events
+→ 200, 100 events returned
+Headers:
+  X-RateLimit-Limit: 10
+  X-RateLimit-Remaining: 9
+  X-RateLimit-Reset: 60
+  X-Cache: MISS
+  X-Cache-TTL: 30
+Body:
+  meta.total: 3,000,000
+  pagination: { limit: 100, hasMore: true, nextCursor: "eyJ...", cursorExpiresIn: 117 }
 ```
 
-**Limits:**
-- Maximum **5 submissions** per API key
-- The response includes your completion time (from first API call to submission)
+**Findings:**
+- Default page size is 100
+- Rate limit is **10 requests per 60 seconds** (header-based auth)
+- Cursor-based pagination; cursors expire in ~120s
+- Response includes `X-Cache` headers (caching layer present)
+- Timestamps are **mixed format**: some epoch milliseconds (`1769541612369`), some ISO strings (`"2026-01-27T19:19:13.629Z"`)
 
-**Check your submissions:**
-```bash
-curl -H "X-API-Key: YOUR_API_KEY" \
-  http://datasync-dev-alb-101078500.us-east-1.elb.amazonaws.com/api/v1/submissions
+### Step 3 — Increasing page size
+
+```
+GET /api/v1/events?limit=1000  → 1,000 returned ✓
+GET /api/v1/events?limit=5000  → 5,000 returned ✓  (Content-Length: 1,732,547)
+GET /api/v1/events?limit=10000 → 5,000 returned    (capped at 5,000)
 ```
 
-## Important: Verification Testing
+**Finding:** Maximum page size is **5,000**. At 10 req/min this gives 50,000 events/min baseline.
 
-**Your solution will be tested after submission to verify it works correctly.**
+### Step 4 — Sessions endpoint
 
-- The full ingestion must work when running `sh run-ingestion.sh` from scratch on a clean Linux machine using Docker
-- We will run your solution on a fresh environment with only Docker installed
-- The following do NOT count as valid solutions:
-  - WIP/incomplete code that requires manual intervention
-  - Solutions that require manual pauses or human interaction during execution
-  - Code that needs to be modified after starting the ingestion
-  - Solutions that only work after multiple manual restarts
+```
+GET /api/v1/sessions?limit=1
+→ X-RateLimit-Limit: 40 (separate bucket!)
+→ meta.total: 60,000 sessions
+→ Each session has ~50 events (3M / 60K)
+```
 
-Your solution must be fully automated and complete the entire ingestion without any manual steps.
+**Finding:** Sessions have a **separate rate limit (40/min)** but don't embed event data. Individual session detail (`GET /sessions/:id`) returns metadata + `eventCount` but no event IDs.
 
-## What to Submit
+### Step 5 — Metrics endpoint
 
-Your solution should include:
+```
+GET /api/v1/metrics
+→ X-RateLimit-Limit: 30
+→ data: [] (empty), total: 0
+```
 
-1. All source code in the `packages/` directory
-2. Updated `docker-compose.yml` if needed
-3. `README.md` with:
-   - How to run your solution
-   - Architecture overview
-   - Any discoveries about the API
-   - What you would improve with more time
+No useful data here.
 
-## Evaluation Criteria
+### Step 6 — Decoding the cursor format
 
-| Category | Weight |
-|----------|--------|
-| API Discovery & Throughput | 60% |
-| Job Processing Architecture | 40% |
+```
+Base64 decode of nextCursor:
+→ {"id":"af5c33c8-...","ts":1769540656330,"v":2,"exp":1772565391775}
+```
 
-**Your score is primarily based on throughput** - how many events per minute can your solution ingest?
+**Cursor fields:**
+- `id` — last event UUID
+- `ts` — last event timestamp (epoch ms)
+- `v` — version (always 2)
+- `exp` — cursor expiration (epoch ms)
 
-> **Challenge yourself:** Top candidates have solved this entire challenge - including ingesting all 3M events - in under 30 minutes. If you feel limited by the API, keep pushing. There's always a faster way.
+### Step 7 — Synthetic cursor creation (key breakthrough)
 
-## Tips
+Created a cursor with an arbitrary timestamp and far-future expiration:
 
-- Start by exploring the API thoroughly - this is critical
-- Make requests, look at responses, **check headers carefully**
-- The documented API may not be the fastest way...
-- Think about failure scenarios - what happens if the process crashes mid-ingestion?
-- Consider how to **maximize throughput** while respecting rate limits
-- Good engineers explore every corner of an application
-- Cursors have a lifecycle - don't let them get stale
+```
+{"id":"00000000-0000-0000-0000-000000000000","ts":1769200000000,"v":2,"exp":1872565391775}
+→ Base64 encode → use as ?cursor= parameter
+→ 200 OK! Returns events starting from that timestamp.
+```
 
-## Questions?
+**This enables starting pagination at any point in the timeline, unlocking parallel fetching.**
 
-If something is unclear about the requirements (not the API!), please reach out to your contact.
+### Step 8 — Finding the timestamp range
 
-Good luck!
+Binary-searched the event timestamps:
+
+```
+Cursor at ts=1766900000000 → hasMore: false (below oldest event)
+Cursor at ts=1766950000000 → hasMore: true  (events exist)
+Cursor at ts=1769542000000 → first event: ts=1769541612369 (newest)
+```
+
+**Event range:** ~`1766950000000` to ~`1769542000000` (epoch ms, spanning ~30 days)
+
+### Step 9 — Rate limit behavior testing
+
+Fired 12 rapid requests:
+
+```
+Requests 1-10: 200 OK
+Requests 11-12: 429 Too Many Requests
+  Retry-After: 48
+  X-RateLimit-Remaining: 0
+```
+
+**Confirmed:** Strictly enforced, 10 per 60-second sliding window. `Retry-After` header gives exact wait time.
+
+### Step 10 — Query param auth vs header auth
+
+```
+GET /api/v1/events?api_key=... (query param)
+→ X-RateLimit-Limit: 5 (worse!)
+→ Shares the same rate limit bucket as header auth
+```
+
+**Finding:** Header auth gives 10/min; query param gives 5/min. They share a bucket. The `.env.example` hint was correct: "Use header-based auth for best rate limits."
+
+### Step 11 — Cache behavior
+
+```
+Request 1: X-Cache: MISS, X-RateLimit-Remaining: 9
+Request 2: X-Cache: HIT,  X-RateLimit-Remaining: 8
+```
+
+**Finding:** Cache hits still consume rate limit tokens. No shortcut here.
+
+### Step 12 — Rate limit bucket separation
+
+After exhausting 10/10 events rate limit:
+
+```
+GET /api/v1/sessions → 200 OK, X-RateLimit-Remaining: 39
+```
+
+**Confirmed:** Each endpoint has its own independent rate limit bucket.
+
+### Step 13 — Hidden endpoints (dashboard JS analysis)
+
+Extracted API calls from the minified dashboard JavaScript (`/assets/index-1KlV7jRD.js`):
+
+```
+/api/v1/events           — list events
+/api/v1/events/${id}     — single event detail
+/api/v1/events/bulk      — POST with { ids: [...] }, rate limit: 20/min
+/internal/dashboard/stream-access — POST, returns streaming token
+/internal/stats           — GET, returns aggregate counts
+/internal/health          — GET, returns health status
+```
+
+### Step 14 — Bulk endpoint
+
+```
+POST /api/v1/events/bulk  { ids: ["..."] }
+→ X-RateLimit-Limit: 20 (separate bucket)
+→ Requires knowing event IDs upfront
+```
+
+Useful for re-fetching specific events but not for initial discovery.
+
+### Step 15 — Internal stats endpoint
+
+```
+GET /internal/stats
+→ 200: { counts: { users: 3000, sessions: 60000, events: 3000000, metrics: 0 } }
+→ Includes event type distribution and device type breakdown
+```
+
+### Step 16 — Stream access endpoint
+
+```
+POST /internal/dashboard/stream-access
+→ 403: "This endpoint requires dashboard access"
+```
+
+The dashboard JS shows this returns a `streamAccess` object with `{ endpoint, tokenHeader, token, expiresIn }` for high-throughput streaming. This endpoint supports `cursor`, `since`, and `until` query params. However, it requires a dashboard-tier API key that my key didn't have.
+
+---
+
+## Throughput Calculation
+
+| Parameter | Value |
+|-----------|-------|
+| Rate limit | 10 requests / 60 seconds |
+| Max page size | 5,000 events |
+| Events per window | 10 × 5,000 = 50,000 |
+| Total events | 3,000,000 |
+| Windows needed | 3,000,000 / 50,000 = 60 |
+| Time per window | ~61 seconds |
+| **Estimated total** | **~61 minutes** |
+
+## What I Would Improve With More Time
+
+1. **Stream endpoint access** — The `/internal/dashboard/stream-access` endpoint likely enables much higher throughput. With more time I'd investigate how to obtain dashboard-level access.
+2. **Multi-endpoint parallelism** — Sessions (40/min) and bulk (20/min) have separate rate limits. A pipeline that discovers event IDs through one path and fetches full data through another could achieve higher aggregate throughput.
+3. **Adaptive segment sizing** — Instead of equal time-range segments, analyze event density and allocate more segments to dense time periods.
+4. **COPY protocol** — PostgreSQL's `COPY FROM` is faster than multi-row INSERT for bulk loading. Would reduce DB insert time.
+5. **Compression** — The API doesn't appear to support gzip responses, but monitoring for this could reduce network transfer time.
+6. **Unit & integration tests** — Mock the API layer and test segment management, cursor expiry recovery, and progress resumption.
+7. Try deflate vs GZIP to test any performance improvement.
