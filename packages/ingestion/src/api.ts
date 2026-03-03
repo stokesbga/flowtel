@@ -83,6 +83,7 @@ export async function fetchEventsPage(
   maxRetries: number = 3,
 ): Promise<ApiResponse> {
   let url = `${baseUrl}/api/v1/events?limit=${limit}`;
+  // let url = `${baseUrl}/api/v1/events/d4ta/x7k9/feed?limit=${limit}`; :(
   if (cursor) {
     url += `&cursor=${encodeURIComponent(cursor)}`;
   }

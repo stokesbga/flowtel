@@ -1,5 +1,20 @@
 # DataSync Ingestion Solution
 
+
+### My README
+---
+Although I ran out of time, I was able to figure out the streaming endpoint would have been substantially faster than Claude's solution. It was a mistake to leave the initial API discovery to Claude, and investigate myself after Claude had started building a solution. Claude, having restrictions on unpublished/undocumented API's, would not use the /events/d4ta/x7k9/feed endpoint, and to write a solution from scratch would be tight, given I am editing this README about 16 minutes from the 3hr key expiration. Time permitting, I would get the stream-access token on any failed request, fetch events(feed) in batches of 5000 (discovered limit), and remove the logic for cooldown. I did NOT see a cooldown associated with the stream/feed API. Each batch of 5000 took approximately 4.09s, which in series would execute under ideal circumstances in 2454s/41m. (3000000/5000*4.09)
+
+Given the instructions said under 30m was possible, I assume we can use concurrency - perhaps even with separate tokens?
+My submission only has 5000 ids purely to show the endpoint was reached manually.
+Claude's solution should work as expected, albeit slowly, via the regular events API, taking ~3 hours to execute.
+
+
+
+### Claude's README 
+--- 
+
+
 ## How to Run
 
 ```bash
@@ -273,7 +288,4 @@ The dashboard JS shows this returns a `streamAccess` object with `{ endpoint, to
 4. **COPY protocol** — PostgreSQL's `COPY FROM` is faster than multi-row INSERT for bulk loading. Would reduce DB insert time.
 5. **Compression** — The API doesn't appear to support gzip responses, but monitoring for this could reduce network transfer time.
 6. **Unit & integration tests** — Mock the API layer and test segment management, cursor expiry recovery, and progress resumption.
-
-## Tools Used
-
-- **Claude Code (Claude Opus 4.6)** — API exploration, architecture design, TypeScript implementation, and this documentation.
+7. Try deflate vs GZIP to test any performance improvement.
